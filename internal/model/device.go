@@ -107,3 +107,56 @@ type LevelSample struct {
 	Meters     float64   `json:"meters"`
 	ObservedAt time.Time `json:"observed_at"`
 }
+
+// Reach identifies one of the three water surfaces relevant to leveling.
+type Reach string
+
+const (
+	ReachUpstream   Reach = "upstream"
+	ReachChamber    Reach = "chamber"
+	ReachDownstream Reach = "downstream"
+)
+
+func (r Reach) Valid() bool {
+	return r == ReachUpstream || r == ReachChamber || r == ReachDownstream
+}
+
+func (r Reach) Direction() (Direction, bool) {
+	switch r {
+	case ReachUpstream:
+		return DirectionUpstream, true
+	case ReachDownstream:
+		return DirectionDownstream, true
+	default:
+		return "", false
+	}
+}
+
+// ReachLevelSample is one telemetry reading for a single water surface.
+type ReachLevelSample struct {
+	CycleID    uuid.UUID `json:"cycle_id"`
+	Generation uint64    `json:"generation"`
+	Reach      Reach     `json:"reach"`
+	Meters     float64   `json:"meters"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+// NewReachLevelSample validates a reading and normalizes its timestamp to UTC.
+func NewReachLevelSample(cycleID uuid.UUID, generation uint64, reach Reach, meters float64, observedAt time.Time) (ReachLevelSample, error) {
+	if cycleID == uuid.Nil || generation == 0 {
+		return ReachLevelSample{}, errors.New("sample requires a transit cycle and generation")
+	}
+	if !reach.Valid() {
+		return ReachLevelSample{}, fmt.Errorf("invalid level reach %q", reach)
+	}
+	if meters <= 0 {
+		return ReachLevelSample{}, errors.New("level must be positive")
+	}
+	if observedAt.IsZero() {
+		return ReachLevelSample{}, errors.New("sample observation time is required")
+	}
+	return ReachLevelSample{
+		CycleID: cycleID, Generation: generation, Reach: reach,
+		Meters: meters, ObservedAt: observedAt.UTC(),
+	}, nil
+}

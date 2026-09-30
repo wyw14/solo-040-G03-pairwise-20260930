@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LockFlow Leveling</title><link rel="stylesheet" href="/assets/styles.css"></head>
+<body><header><div class="brand"><span class="brand-mark">LF</span>LockFlow</div><nav><a href="/operations">Operations</a><a href="/chamber">Chamber</a><a aria-current="page" href="/leveling">Leveling</a><a href="/interlocks">Interlocks</a><a href="/incidents">Incidents</a></nav></header>
+<main>
+  <div class="page-title">
+    <div><h1>闸室调平目标</h1><div class="muted">三点实时水位 · 可解释目标水位 · 分步阀门斜坡指令</div></div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <select id="chamber" style="min-width:160px"><option>chamber-1</option><option>chamber-2</option></select>
+      <button id="refresh">刷新方案</button>
+    </div>
+  </div>
+  <div class="grid">
+    <section class="panel">
+      <h2>实时水位采样</h2>
+      <div class="form-row">
+        <div><label for="m-upstream">上游水位 (m)</label><input id="m-upstream" type="number" step="0.01" value="10"></div>
+        <div><label for="m-chamber">闸室水位 (m)</label><input id="m-chamber" type="number" step="0.01" value="8.5"></div>
+        <div><label for="m-downstream">下游水位 (m)</label><input id="m-downstream" type="number" step="0.01" value="4"></div>
+      </div>
+      <button id="submit-samples">提交三点采样（当前闸次代次）</button>
+      <div class="message" id="sample-message"></div>
+      <table style="margin-top:12px"><thead><tr><th>水面</th><th>水位 (m)</th><th>采样龄期</th><th>新鲜度</th><th>闸次 / 代次</th></tr></thead><tbody id="samples"></tbody></table>
+    </section>
+    <section class="panel">
+      <h2>调平目标</h2>
+      <div class="metrics">
+        <div class="metric">目标水面<strong id="t-reach">-</strong></div>
+        <div class="metric">目标水位<strong id="t-level">-</strong></div>
+        <div class="metric">闸室水位<strong id="t-chamber">-</strong></div>
+      </div>
+      <table style="margin-top:10px">
+        <tr><th>闸次 / 代次</th><td id="t-cycle">-</td></tr>
+        <tr><th>过闸方向 / 阶段</th><td id="t-stage">-</td></tr>
+        <tr><th>水位差 / 模式</th><td id="t-gap">-</td></tr>
+        <tr><th>容差 / 采样新鲜窗口</th><td id="t-tol">-</td></tr>
+        <tr><th>可执行</th><td id="t-exec">-</td></tr>
+      </table>
+      <div class="message" id="blocked"></div>
+    </section>
+    <section class="panel wide">
+      <h2>分步阀门指令</h2>
+      <table><thead><tr><th>#</th><th>阀门</th><th>动作</th><th>开度</th><th>斜坡目标</th><th>解释</th></tr></thead><tbody id="instructions"></tbody></table>
+      <div style="display:flex;gap:10px;margin-top:12px;align-items:center">
+        <button id="execute">按方案执行斜坡</button>
+        <span class="muted" id="exec-note">缺少新鲜采样或闸次不匹配时按钮不会下发指令</span>
+      </div>
+      <div class="message" id="exec-message"></div>
+    </section>
+    <section class="panel wide">
+      <h2>闸室调平参数</h2>
+      <div class="form-row">
+        <div><label>上游正常水位 (m)</label><input id="c-up" type="number" step="0.1"></div>
+        <div><label>下游正常水位 (m)</label><input id="c-down" type="number" step="0.1"></div>
+        <div><label>库水位漂移限值 (m)</label><input id="c-drift" type="number" step="0.1"></div>
+      </div>
+      <div class="form-row">
+        <div><label>目标容差 (m)</label><input id="c-tol" type="number" step="0.01"></div>
+        <div><label>采样最大龄期 (s)</label><input id="c-fresh" type="number" step="1"></div>
+        <div><label>粗调档/细调档开度</label><div style="display:flex;gap:8px"><input id="c-coarse" type="number" step="0.05"><input id="c-fine" type="number" step="0.05"></div></div>
+      </div>
+      <div class="form-row">
+        <div><label>粗调单步当量 (m)</label><input id="c-delta" type="number" step="0.1"></div>
+        <div><label>最大步数</label><input id="c-steps" type="number" step="1"></div>
+        <div style="display:flex;align-items:flex-end"><button id="save-config">保存闸室参数</button></div>
+      </div>
+      <div class="message" id="config-message"></div>
+    </section>
+  </div>
+</main>
+<script src="/assets/app.js"></script>
+<script>
+const { api, shortID, text, setMessage, withBusy } = window.LockFlow;
+const $ = (id) => document.querySelector(id);
+const chamber = () => $('#chamber').value;
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(d);
+const reachName = { upstream: '上游', chamber: '闸室', downstream: '下游' };
+
+async function loadConfig() {
+  const cfg = await api(`/api/chambers/${chamber()}/leveling/config`);
+  $('#c-up').value = cfg.upstream_normal_m;
+  $('#c-down').value = cfg.downstream_normal_m;
+  $('#c-drift').value = cfg.pool_drift_m;
+  $('#c-tol').value = cfg.target_tolerance_m;
+  $('#c-fresh').value = cfg.sample_max_age_seconds;
+  $('#c-coarse').value = cfg.coarse_opening;
+  $('#c-fine').value = cfg.fine_opening;
+  $('#c-delta').value = cfg.coarse_delta_m;
+  $('#c-steps').value = cfg.max_steps;
+}
+
+function sampleRow(sample, maxAge) {
+  const age = sample ? sample.observed_at ? Math.max(0, (Date.now() - Date.parse(sample.observed_at)) / 1000) : null : null;
+  const fresh = age !== null && age <= maxAge;
+  const badge = age === null ? '<span class="muted">缺失</span>'
+    : fresh ? '<span style="color:#5bc0be">新鲜</span>'
+    : '<span style="color:#ef6f6c">过期</span>';
+  const ageText = age === null ? '-' : `${age.toFixed(0)} / ${maxAge.toFixed(0)} s`;
+  const cyc = sample ? `${shortID(sample.cycle_id)} · g${sample.generation}` : '-';
+  return `<tr><td>${reachName[sample?.reach] || '-'}</td><td>${sample ? fmt(sample.meters) : '-'}</td><td>${ageText}</td><td>${badge}</td><td>${cyc}</td></tr>`;
+}
+
+async function loadPlan() {
+  setMessage($('#exec-message'), '');
+  try {
+    const plan = await api(`/api/chambers/${chamber()}/leveling/plan`);
+    $('#t-reach').textContent = reachName[plan.target_reach] || text(plan.target_reach);
+    $('#t-level').textContent = `${fmt(plan.target_level_m)} m`;
+    $('#t-chamber').textContent = `${fmt(plan.chamber_level_m)} m`;
+    $('#t-cycle').textContent = `${shortID(plan.cycle_id)} · 代次 ${plan.generation}`;
+    $('#t-stage').textContent = `${plan.direction} / ${plan.stage}`;
+    $('#t-gap').textContent = `${plan.gap_m >= 0 ? '+' : ''}${fmt(plan.gap_m)} m · ${plan.mode}`;
+    $('#t-tol').textContent = `±${fmt(plan.tolerance_m)} m / ${plan.sample_max_age_seconds.toFixed(0)} s`;
+    $('#t-exec').innerHTML = plan.executable
+      ? '<span style="color:#5bc0be">是，可执行</span>'
+      : '<span style="color:#ef6f6c">否，已阻断</span>';
+    setMessage($('#blocked'), plan.blocked_reasons.length ? plan.blocked_reasons.map((r) => '• ' + r).join('\n') : '');
+    $('#execute').disabled = !plan.executable;
+    const rows = (plan.instructions || []).map((s) => `<tr>
+      <td>${s.step}</td><td>${s.device}</td><td>${s.action}</td>
+      <td>${fmt(s.opening, 2)}</td><td>${s.signed_target > 0 ? '+' : ''}${fmt(s.signed_target, 2)}</td>
+      <td class="muted">${s.rationale}</td></tr>`).join('');
+    $('#instructions').innerHTML = rows || '<tr><td colspan="6" class="muted">暂无可执行指令：缺少新鲜采样或方案被阻断。</td></tr>';
+    const maxAge = plan.sample_max_age_seconds || 0;
+    const byReach = Object.fromEntries((plan.samples || []).map((s) => [s.reach, s]));
+    $('#samples').innerHTML = ['upstream', 'chamber', 'downstream']
+      .map((r) => {
+        const s = byReach[r] ? { ...byReach[r], reach: r } : null;
+        return sampleRow(s, maxAge);
+      }).join('');
+  } catch (e) {
+    ['t-reach', 't-level', 't-chamber'].forEach((id) => $(id).textContent = '-');
+    $('#t-cycle').textContent = '无活动闸次';
+    $('#t-stage').textContent = '-';
+    $('#t-gap').textContent = '-';
+    $('#t-tol').textContent = '-';
+    $('#t-exec').innerHTML = '<span style="color:#ef6f6c">否</span>';
+    $('#execute').disabled = true;
+    $('#instructions').innerHTML = `<tr><td colspan="6" class="muted">${e.message}</td></tr>`;
+    $('#samples').innerHTML = ['upstream', 'chamber', 'downstream'].map(() => sampleRow(null, 0)).join('');
+    setMessage($('#blocked'), e.message);
+  }
+}
+
+$('#submit-samples').addEventListener('click', () => withBusy($('#submit-samples'), async () => {
+  setMessage($('#sample-message'), '');
+  const readings = [
+    { reach: 'upstream', meters: parseFloat($('#m-upstream').value) },
+    { reach: 'chamber', meters: parseFloat($('#m-chamber').value) },
+    { reach: 'downstream', meters: parseFloat($('#m-downstream').value) },
+  ];
+  try {
+    await api(`/api/chambers/${chamber()}/leveling/samples`, {
+      method: 'POST', body: JSON.stringify({ samples: readings }),
+    });
+    await loadPlan();
+  } catch (e) {
+    setMessage($('#sample-message'), e.message);
+  }
+}));
+
+$('#execute').addEventListener('click', () => withBusy($('#execute'), async () => {
+  setMessage($('#exec-message'), '');
+  try {
+    const result = await api(`/api/chambers/${chamber()}/leveling/execute`, { method: 'POST', body: '{}' });
+    setMessage($('#exec-message'), `已下发 ${result.ramp.steps.length} 步斜坡，闸次 ${shortID(result.plan.cycle_id)} 代次 ${result.plan.generation}。`);
+    await loadPlan();
+  } catch (e) {
+    setMessage($('#exec-message'), `执行被拒绝：${e.message}（旧闸次或过期采样的方案不会下发阀门）`);
+    await loadPlan();
+  }
+}));
+
+$('#save-config').addEventListener('click', () => withBusy($('#save-config'), async () => {
+  setMessage($('#config-message'), '');
+  const body = {
+    upstream_normal_m: parseFloat($('#c-up').value),
+    downstream_normal_m: parseFloat($('#c-down').value),
+    pool_drift_m: parseFloat($('#c-drift').value),
+    target_tolerance_m: parseFloat($('#c-tol').value),
+    sample_max_age_seconds: parseFloat($('#c-fresh').value),
+    coarse_opening: parseFloat($('#c-coarse').value),
+    fine_opening: parseFloat($('#c-fine').value),
+    coarse_delta_m: parseFloat($('#c-delta').value),
+    max_steps: parseInt($('#c-steps').value, 10),
+  };
+  try {
+    await api(`/api/chambers/${chamber()}/leveling/config`, { method: 'PUT', body: JSON.stringify(body) });
+    setMessage($('#config-message'), '闸室参数已保存，下一版方案立即按新参数生成。');
+    await loadPlan();
+  } catch (e) {
+    setMessage($('#config-message'), e.message);
+  }
+}));
+
+$('#chamber').addEventListener('change', () => Promise.all([loadConfig(), loadPlan()]).catch(() => {}));
+$('#refresh').addEventListener('click', () => loadPlan().catch((e) => setMessage($('#blocked'), e.message)));
+Promise.all([loadConfig(), loadPlan()]).catch((e) => setMessage($('#blocked'), e.message));
+setInterval(() => loadPlan().catch(() => {}), 5000);
+</script>
+</body></html>
