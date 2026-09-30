@@ -11,6 +11,7 @@ import (
 	"github.com/wyw14/cry-96/internal/interlock"
 	"github.com/wyw14/cry-96/internal/journal"
 	"github.com/wyw14/cry-96/internal/lease"
+	"github.com/wyw14/cry-96/internal/leveling"
 	"github.com/wyw14/cry-96/internal/model"
 	"github.com/wyw14/cry-96/internal/monitor"
 	"github.com/wyw14/cry-96/internal/safety"
@@ -34,6 +35,7 @@ type Runtime struct {
 	Schedule        *schedule.Service
 	Hydraulics      *hydraulics.Controller
 	Interlocks      *interlock.Coordinator
+	Leveling        *leveling.Service
 	Cycles          *cycle.Coordinator
 	CycleService    *cycle.Service
 	Leases          *lease.Service
@@ -89,6 +91,13 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 	)
 	cycleCoordinator := cycle.NewCoordinator(gateController, hydraulicsController, recorder, now)
 	cycleService := cycle.NewService(cycleCoordinator, admissionService)
+	levelReadings := leveling.NewReadingStore(now)
+	levelingService := leveling.NewService(cycleCoordinator, hydraulicsController, levelReadings, recorder, now)
+	for _, chamberID := range chambers {
+		if _, err := levelingService.Configure(chamberID, leveling.DefaultConfig()); err != nil {
+			return nil, err
+		}
+	}
 	safetyCoordinator = safety.NewCoordinator(gateCommands, barrier, recorder, now)
 	safetyService := safety.NewService(safetyCoordinator, cycleCoordinator)
 	signalService.BindTransitLookup(cycleCoordinator)
@@ -112,7 +121,8 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 		SignalStore: signalStore, SignalPublisher: signalPublisher, Signals: signalService,
 		AdmissionQueue: admissionController.Queue(), Admission: admissionService,
 		Planner: planner, Schedule: scheduleService, Hydraulics: hydraulicsController,
-		Interlocks: interlockCoordinator, Cycles: cycleCoordinator, CycleService: cycleService,
+		Interlocks: interlockCoordinator, Leveling: levelingService,
+		Cycles: cycleCoordinator, CycleService: cycleService,
 		Leases: leaseService, LeaseSweeper: leaseSweeper, Safety: safetyService,
 		Snapshot:  monitor.NewSnapshot(cycleCoordinator, gateState, admissionService, signalService, safetyService, now),
 		Incidents: monitor.NewIncidentReview(store), Health: health, Recovery: recovery,

@@ -78,18 +78,54 @@ func (c *Controller) windowForCycle(cycleID interface{ String() string }, genera
 	return nil, errors.New("no active level window for transit")
 }
 
-func (c *Controller) IssueValve(ctx context.Context, cycle model.TransitCycle, target float64) error {
-	device := model.DeviceFillValve
-	if target < 0 {
-		device = model.DeviceDrainValve
-		target = -target
-	}
-	command, err := c.commands.Issue(cycle, device, "set_opening", target, c.now())
+func (c *Controller) issueDevice(ctx context.Context, cycle model.TransitCycle, device model.DeviceKind, opening float64) (model.DeviceCommand, error) {
+	command, err := c.commands.Issue(cycle, device, "set_opening", opening, c.now())
 	if err != nil {
-		return err
+		return model.DeviceCommand{}, err
 	}
 	_, err = c.recorder.Record(ctx, cycle.ChamberID, model.EventCommandQueued, cycle.ID, cycle.Generation, command)
+	if err != nil {
+		return model.DeviceCommand{}, err
+	}
+	return command, nil
+}
+
+// IssueValve keeps the historical signed-target surface: a positive opening
+// drives the fill valve, a negative opening the drain valve.
+func (c *Controller) IssueValve(ctx context.Context, cycle model.TransitCycle, target float64) error {
+	_, err := c.IssueValveCommand(ctx, cycle, target)
 	return err
+}
+
+// IssueValveCommand issues one signed valve opening and returns the command so
+// callers (e.g. the leveling planner) can correlate it with their own steps.
+func (c *Controller) IssueValveCommand(ctx context.Context, cycle model.TransitCycle, target float64) (model.DeviceCommand, error) {
+	device := model.DeviceFillValve
+	opening := target
+	if target < 0 {
+		device = model.DeviceDrainValve
+		opening = -target
+	}
+	return c.issueDevice(ctx, cycle, device, opening)
+}
+
+// CloseValves commands both valves to a zero opening, used to leave the
+// hydraulic system safe when a fenced leveling ramp aborts midway.
+func (c *Controller) CloseValves(ctx context.Context, cycle model.TransitCycle) error {
+	if _, err := c.issueDevice(ctx, cycle, model.DeviceFillValve, 0); err != nil {
+		return err
+	}
+	_, err := c.issueDevice(ctx, cycle, model.DeviceDrainValve, 0)
+	return err
+}
+
+// RampWith runs the existing ramp with a caller-supplied issuer so each step
+// can be fenced against the live transit generation before a valve is driven.
+func (c *Controller) RampWith(ctx context.Context, cycle model.TransitCycle, targets []float64, issue StepIssuer) (RampResult, error) {
+	if issue == nil {
+		issue = c.IssueValve
+	}
+	return c.ramp.Run(ctx, cycle, targets, issue)
 }
 
 func (c *Controller) RampTo(ctx context.Context, cycle model.TransitCycle, targets []float64) (RampResult, error) {

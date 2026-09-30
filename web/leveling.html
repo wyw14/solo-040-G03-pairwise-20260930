@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LockFlow Leveling</title><link rel="stylesheet" href="/assets/styles.css"></head>
+<body><header><div class="brand"><span class="brand-mark">LF</span>LockFlow</div><nav><a href="/operations">Operations</a><a href="/chamber">Chamber</a><a aria-current="page" href="/leveling">Leveling</a><a href="/interlocks">Interlocks</a><a href="/incidents">Incidents</a></nav></header>
+<main><div class="page-title"><div><h1>Chamber leveling targets</h1><div class="muted">Explainable target level and stepwise valve commands, tied to live samples and the transit generation</div></div><button id="refresh">Refresh</button></div><div class="grid" id="chambers"></div><div class="message" id="message"></div></main>
+<script src="/assets/app.js"></script><script>
+const {api,shortID,setMessage,withBusy}=window.LockFlow;
+const host=document.querySelector('#chambers'); const message=document.querySelector('#message');
+const ROLES=[['upstream','Upstream pool'],['downstream','Downstream pool'],['chamber','Chamber']];
+const fmtTime=(v)=>v?new Date(v).toLocaleTimeString():'-';
+const badge=(ok,text)=>`<span class="status ${ok?'':'critical'}">${text}</span>`;
+
+function readingsBlock(view){
+  const r=view.readings;
+  if(!r){return '<p class="muted">No active transit.</p>';}
+  const rows=ROLES.map(([key,label])=>{
+    const sample=r.readings[key];
+    const present=sample&&sample.observed_at;
+    const fresh=r.fresh[key];
+    const state=!present?'no sample':(fresh?'fresh':'stale / other generation');
+    return `<tr><td>${label}</td><td>${present?sample.meters.toFixed(2)+' m':'-'}</td><td>${present?'gen '+sample.generation:'-'}</td><td>${fmtTime(present&&sample.observed_at)}</td><td>${badge(present&&fresh,state)}</td></tr>`;
+  }).join('');
+  return `<table><tr><th>Surface</th><th>Level</th><th>Generation</th><th>Observed</th><th>Freshness</th></tr>${rows}</table>`;
+}
+
+function telemetryForm(chamber){
+  return `<form class="telemetry" data-chamber="${chamber}"><div class="form-row">
+    <label>Upstream m<input type="number" step="0.01" name="upstream" required></label>
+    <label>Downstream m<input type="number" step="0.01" name="downstream" required></label>
+    <label>Chamber m<input type="number" step="0.01" name="chamber" required></label>
+  </div><button type="submit">Post fresh readings</button></form>`;
+}
+
+function configForm(chamber,cfg){
+  return `<details><summary class="muted">Chamber parameters</summary><form class="config" data-chamber="${chamber}" style="margin-top:10px"><div class="form-row">
+    <label>Tolerance m<input type="number" step="0.01" name="tolerance_m" value="${cfg.tolerance_m}"></label>
+    <label>Max step m<input type="number" step="0.01" name="max_step_m" value="${cfg.max_step_m}"></label>
+    <label>Max opening %<input type="number" step="1" name="max_opening_percent" value="${cfg.max_opening_percent}"></label>
+  </div><div class="form-row">
+    <label>Final opening %<input type="number" step="1" name="final_opening_percent" value="${cfg.final_opening_percent}"></label>
+    <label>Sample freshness s<input type="number" step="1" name="freshness_seconds" value="${cfg.freshness_seconds}"></label>
+    <span></span>
+  </div><button type="submit">Save parameters</button></form></details>`;
+}
+
+function planBlock(view){
+  const p=view.plan;
+  if(!p){return '<p class="muted">No leveling plan yet. Post fresh readings, then build the target.</p>';}
+  const current=view.cycle;
+  const matchesCurrent=current&&p.cycle_id===current.id&&p.generation===current.generation;
+  const banner=matchesCurrent
+    ? `<p>${badge(true,'plan matches current transit gen '+p.generation)}</p>`
+    : `<p>${badge(false,'plan belongs to an OLD transit ('+shortID(p.cycle_id)+' gen '+p.generation+') and is blocked from executing')}</p>`;
+  const steps=(p.steps&&p.steps.length)?`<table><tr><th>#</th><th>Valve</th><th>Opening</th><th>From&rarr;To (m)</th><th>Why</th><th>Command</th></tr>`+
+    p.steps.map(s=>`<tr><td>${s.index+1}</td><td>${s.device.replace('_valve','')}</td><td>${s.opening.toFixed(0)}%${s.closes_valve?' (close)':''}</td><td>${s.from_level.toFixed(2)}&rarr;${s.to_level.toFixed(2)}</td><td>${s.rationale}</td><td>${shortID(s.command_id)||'-'}</td></tr>`).join('')+'</table>'
+    : '<p class="muted">Chamber is already level inside tolerance; no valve movement required.</p>';
+  const reasons=p.reasons.map(x=>`<li>${x}</li>`).join('');
+  return `<div class="metrics" style="margin-bottom:10px">
+      <div class="metric">Target<strong>${p.target_level.toFixed(2)} m (${p.target_role})</strong></div>
+      <div class="metric">Chamber / head<strong>${p.chamber_level.toFixed(2)} m / ${p.head_m>=0?'+':''}${p.head_m.toFixed(2)} m</strong></div>
+      <div class="metric">Mode / status<strong>${p.mode} / ${p.status}</strong></div>
+    </div>${banner}<ul class="muted" style="font-size:13px">${reasons}</ul>${steps}
+    <p class="muted">Plan ${shortID(p.id)} from ${fmtTime(p.created_at)}${p.failure_note?' &middot; <span style="color:#ef6f6c">'+p.failure_note+'</span>':''}</p>
+    <div style="display:flex;gap:10px;margin-top:8px">
+      <button class="act" data-chamber="${view.chamber_id}" data-action="plan">Rebuild target</button>
+      <button class="act" data-chamber="${view.chamber_id}" data-action="execute" ${matchesCurrent&&p.status==='planned'?'':'disabled'}>Execute stepwise valve plan</button>
+    </div>`;
+}
+
+function panel(view){
+  const c=view.cycle;
+  const stage=c?c.stage:'idle';
+  const canLevel=c&&c.stage==='leveling';
+  return `<section class="panel"><h2>${view.chamber_id}</h2>
+    <div class="metrics">
+      <div class="metric">Stage<strong>${stage}</strong></div>
+      <div class="metric">Direction<strong>${c?c.direction:'-'}</strong></div>
+      <div class="metric">Generation<strong>${c?c.generation:'-'}</strong></div>
+    </div>
+    <table style="margin:10px 0"><tr><th>Cycle</th><td>${shortID(c&&c.id)}</td></tr></table>
+    ${readingsBlock(view)}
+    <div style="margin:14px 0">${canLevel?telemetryForm(view.chamber_id):'<p class="muted">Telemetry and targets are accepted while the cycle is in the leveling stage.</p>'}</div>
+    ${planBlock(view)}
+    <div style="margin-top:14px">${configForm(view.chamber_id,view.config)}</div>
+  </section>`;
+}
+
+async function load(){
+  const views=await api('/api/leveling');
+  host.innerHTML=views.map(panel).join(''); setMessage(message,'');
+}
+
+async function postReadings(form){
+  const chamber=form.dataset.chamber;
+  const readings=ROLES.map(([key])=>({role:key,meters:Number(form.elements[key].value)}));
+  await withBusy(form.querySelector('button'),async()=>{
+    await api(`/api/chambers/${chamber}/leveling/readings`,{method:'POST',body:JSON.stringify({readings})});
+    await buildPlan(chamber); await load();
+  });
+}
+
+async function buildPlan(chamber){
+  return api(`/api/chambers/${chamber}/leveling/plan`,{method:'POST'});
+}
+
+async function saveConfig(form){
+  const chamber=form.dataset.chamber;
+  const payload=Object.fromEntries(['tolerance_m','max_step_m','max_opening_percent','final_opening_percent','freshness_seconds'].map(k=>[k,Number(form.elements[k].value)]));
+  await withBusy(form.querySelector('button'),async()=>{
+    await api(`/api/chambers/${chamber}/leveling/config`,{method:'PUT',body:JSON.stringify(payload)});
+    await load();
+  });
+}
+
+host.addEventListener('click',async(e)=>{
+  const btn=e.target.closest('.act'); if(!btn||btn.disabled) return;
+  try{
+    await withBusy(btn,async()=>{
+      if(btn.dataset.action==='plan'){ await buildPlan(btn.dataset.chamber); }
+      else { await api(`/api/chambers/${btn.dataset.chamber}/leveling/execute`,{method:'POST'}); }
+      await load();
+    });
+  }catch(err){ setMessage(message,err.message); await load(); }
+});
+host.addEventListener('submit',async(e)=>{
+  e.preventDefault();
+  try{
+    if(e.target.classList.contains('telemetry')){ await postReadings(e.target); }
+    else if(e.target.classList.contains('config')){ await saveConfig(e.target); }
+    setMessage(message,'');
+  }catch(err){ setMessage(message,err.message); }
+});
+document.querySelector('#refresh').addEventListener('click',()=>load().catch(e=>setMessage(message,e.message)));
+load().catch(e=>setMessage(message,e.message));
+setInterval(()=>load().catch(()=>{}),5000);
+</script></body></html>
